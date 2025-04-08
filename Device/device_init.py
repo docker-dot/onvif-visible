@@ -20,6 +20,13 @@ class ONVIFCameraController:
             self._services_available = {}  # 缓存服务支持情况
             self._profiles = []  # 媒体profile列表
             self._current_profile = None  # 当前使用的profile
+            self._ptz_service = self._camera.create_ptz_service() if self.check_service_supported('ptz') else None
+            self._media_service = self._camera.create_media_service() if self.check_service_supported('media') else None
+            self._device_service = self._camera.create_devicemgmt_service() if self.check_service_supported(
+                'device') else None
+            self._event_service = self._camera.create_events_service() if self.check_service_supported(
+                'event') else None
+
         except ONVIFError as e:
             raise ConnectionError(f"连接相机失败: {str(e)}") from e
 
@@ -39,8 +46,7 @@ class ONVIFCameraController:
             raise RuntimeError("设备不支持媒体服务")
 
         try:
-            media_service = self._camera.create_media_service()
-            self._profiles = media_service.GetProfiles()
+            self._profiles = self._media_service.GetProfiles()
             if self._profiles:
                 self._current_profile = self._profiles[0]
         except ONVIFError as e:
@@ -68,8 +74,7 @@ class ONVIFCameraController:
             raise RuntimeError("未选择媒体profile")
 
         try:
-            ptz_service = self._camera.create_ptz_service()
-            return ptz_service.GetStatus({'ProfileToken': self._current_profile.token})
+            return self._ptz_service.GetStatus({'ProfileToken': self._current_profile.token})
         except ONVIFError as e:
             raise RuntimeError(f"获取PTZ状态失败: {str(e)}") from e
 
@@ -79,10 +84,35 @@ class ONVIFCameraController:
             raise RuntimeError("设备不支持PTZ服务")
 
         try:
-            ptz_service = self._camera.create_ptz_service()
-            return ptz_service.GetConfigurations()
+            return self._ptz_service.GetConfigurations()
         except ONVIFError as e:
             raise RuntimeError(f"获取PTZ配置失败: {str(e)}") from e
+
+    def create_preset(self, preset_name: str) -> str:
+        """创建新预置位
+        Args:
+            preset_name: 支持中文（自动UTF-8编码）
+        Returns:
+            新预置位的token
+        """
+        try:
+            req = self._ptz_service.create_type('SetPreset')
+            req.ProfileToken = self._current_profile.token
+            req.PresetName = preset_name.encode('utf-8')  # 强制UTF-8编码
+            resp = self._ptz_service.SetPreset(req)
+            return resp.PresetToken
+        except ONVIFError as e:
+            raise RuntimeError(f"创建预置位失败: {str(e)}") from e
+
+    def remove_preset(self, preset_token: str) -> None:
+        """删除指定预置位"""
+        try:
+            req = self._ptz_service.create_type('RemovePreset')
+            req.ProfileToken = self._current_profile.token
+            req.PresetToken = preset_token
+            self._ptz_service.RemovePreset(req)
+        except ONVIFError as e:
+            raise RuntimeError(f"删除预置位失败: {str(e)}") from e
 
     def absolute_move(self, pan: float, tilt: float, zoom: float) -> None:
         """绝对位置移动（需要设备支持）"""
@@ -90,13 +120,88 @@ class ONVIFCameraController:
             raise RuntimeError("未选择媒体profile")
 
         try:
-            ptz_service = self._camera.create_ptz_service()
-            req = ptz_service.create_type('AbsoluteMove')
+            req = self._ptz_service.create_type('AbsoluteMove')
             req.ProfileToken = self._current_profile.token
-            req.Position = {'PanTilt': {'x': pan, 'y': tilt}, 'Zoom': zoom}
-            ptz_service.AbsoluteMove(req)
+            req.Position = {
+                'PanTilt': {'x': pan, 'y': tilt},
+                'Zoom': {'x': zoom}
+            }
+            self._ptz_service.AbsoluteMove(req)
         except ONVIFError as e:
             raise RuntimeError(f"PTZ移动失败: {str(e)}") from e
+
+    def relative_move(self, pan: float, tilt: float, zoom: float) -> None:
+        """相对移动（增量位移控制）
+
+        参数：
+            pan: 水平方向相对位移（范围由设备决定，典型值-1.0到1.0）
+            tilt: 垂直方向相对位移
+            zoom: 变焦相对增量
+        """
+        if not self._current_profile:
+            raise RuntimeError("未选择媒体profile")
+
+        try:
+            req = self._ptz_service.create_type('RelativeMove')
+            req.ProfileToken = self._current_profile.token
+
+            # 设置相对位移向量（关键参数）
+            req.Translation = {
+                'PanTilt': {'x': pan, 'y': tilt},  # 水平/俯仰增量
+                'Zoom': {'x': zoom}  # 变焦增量
+            }
+
+            # 可选速度控制（根据设备支持情况）
+            # req.Speed = {
+            #     'PanTilt': {'x': 0.5, 'y': 0.5},  # 水平/俯仰速度
+            #     'Zoom': {'x': 0.3}                # 变焦速度
+            # }
+
+            self._ptz_service.RelativeMove(req)
+        except ONVIFError as e:
+            raise RuntimeError(f"PTZ相对移动失败: {str(e)}") from e
+
+    def continuous_move(self, pan: float, tilt: float, zoom: float, timeout: int) -> None:
+        """连续移动（速度控制）"""
+        if not self._current_profile:
+            raise RuntimeError("未选择媒体profile")
+
+        try:
+            req = self._ptz_service.create_type('ContinuousMove')
+            req.ProfileToken = self._current_profile.token
+            req.Velocity = {
+                'PanTilt': {'x': pan, 'y': tilt},
+                'Zoom': {'x': zoom}
+            }
+            req.Timeout = f"PT{timeout}S"  # ISO 8601格式超时时间
+            self._ptz_service.ContinuousMove(req)
+        except ONVIFError as e:
+            raise RuntimeError(f"PTZ移动失败: {str(e)}") from e
+
+    def stop_move(self):
+        """停止所有移动"""
+        try:
+            req = self._ptz_service.create_type('Stop')
+            req.ProfileToken = self._current_profile.token
+            req.PanTilt = True
+            req.Zoom = True
+            self._ptz_service.Stop(req)
+        except Exception as e:
+            raise RuntimeError(f"停止失败: {str(e)}") from e
+
+    def get_presets(self) -> List[Dict]:
+        """获取所有预置位"""
+        req = self._ptz_service.create_type('GetPresets')
+        req.ProfileToken = self._current_profile.token
+        presets = self._ptz_service.GetPresets(req)
+        return [{'token': p.token, 'name': p.Name} for p in presets]
+
+    def goto_preset(self, preset_token: str):
+        """跳转到指定预置位"""
+        req = self._ptz_service.create_type('GotoPreset')
+        req.ProfileToken = self._current_profile.token
+        req.PresetToken = preset_token
+        self._ptz_service.GotoPreset(req)
 
     def get_snapshot_uri(self) -> Optional[str]:
         """获取快照URL"""
@@ -104,21 +209,24 @@ class ONVIFCameraController:
             raise RuntimeError("未选择媒体profile")
 
         try:
-            media_service = self._camera.create_media_service()
-            return media_service.GetSnapshotUri({'ProfileToken': self._current_profile.token})
+            return self._media_service.GetSnapshotUri({'ProfileToken': self._current_profile.token})
         except ONVIFError as e:
             raise RuntimeError(f"获取快照URI失败: {str(e)}") from e
 
 
 # 使用示例
 if __name__ == '__main__':
+    IP = '192.168.1.68'
+    PORT = 80
+    USER = 'admin'
+    PASSWORD = 'system123'
     try:
         # 初始化连接
         camera = ONVIFCameraController(
-            ip='192.168.1.68',
-            port=80,
-            user='admin',
-            password='system123'
+            ip=IP,
+            port=PORT,
+            user=USER,
+            password=PASSWORD
             # wsdl_dir='../wsdl/'
         )
 
