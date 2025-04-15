@@ -1,8 +1,13 @@
 from onvif import ONVIFCamera, ONVIFError
 from typing import List, Optional, Dict, Any
 
+IP = '192.168.1.68'
+PORT = 80
+USER = 'admin'
+PASSWORD = 'system123'
 
-class ONVIFCameraController:
+
+class Device:
     """ONVIF相机控制类，封装常用操作"""
 
     def __init__(self, ip: str, port: int, user: str, password: str):
@@ -39,6 +44,23 @@ class ONVIFCameraController:
             except ONVIFError as e:
                 raise RuntimeError("获取设备服务能力失败") from e
         return f'http://www.onvif.org/ver20/{service_name}/wsdl' in self._services_available or f'http://www.onvif.org/ver10/{service_name}/wsdl' in self._services_available
+
+    def _check_space_supported(self, space_type: str) -> bool:
+        """检查PTZ节点是否支持特定坐标空间"""
+        try:
+            configs = self._ptz_service.GetConfigurationOptions({
+                'ConfigurationToken': self._current_profile.PTZConfiguration.token
+            })
+
+            # 空间类型与配置项的映射
+            space_mapping = {
+                'AbsolutePanTiltPositionSpace': configs.Spaces.AbsolutePanTiltPositionSpace,
+                'ContinuousPanTiltVelocitySpace': configs.Spaces.ContinuousPanTiltVelocitySpace,
+                # 其他空间类型类似处理
+            }
+            return bool(space_mapping.get(space_type, []))
+        except ONVIFError as e:
+            raise RuntimeError(f"空间支持检查失败: {str(e)}") from e
 
     def load_profiles(self) -> None:
         """加载所有媒体profile"""
@@ -116,6 +138,11 @@ class ONVIFCameraController:
 
     def absolute_move(self, pan: float, tilt: float, zoom: float) -> None:
         """绝对位置移动（需要设备支持）"""
+        if not all([
+            self._check_space_supported('AbsolutePanTiltPositionSpace'),
+            self._check_space_supported('AbsoluteZoomPositionSpace')
+        ]):
+            raise RuntimeError("设备不支持绝对坐标空间操作")
         if not self._current_profile:
             raise RuntimeError("未选择媒体profile")
 
@@ -214,37 +241,37 @@ class ONVIFCameraController:
             raise RuntimeError(f"获取快照URI失败: {str(e)}") from e
 
 
-# 使用示例
-if __name__ == '__main__':
-    IP = '192.168.1.68'
-    PORT = 80
-    USER = 'admin'
-    PASSWORD = 'system123'
-    try:
-        # 初始化连接
-        camera = ONVIFCameraController(
-            ip=IP,
-            port=PORT,
-            user=USER,
-            password=PASSWORD
-            # wsdl_dir='../wsdl/'
-        )
-
-        # 加载profiles
-        camera.load_profiles()
-
-        # 获取PTZ状态
-        status = camera.get_ptz_status()
-        print(f"当前PTZ状态: {status}")
-
-        # 打印所有profile
-        print("可用profiles:")
-        for profile in camera.profiles:
-            print(f" - {profile.Name} (Token: {profile.token})")
-
-        # 获取快照地址
-        snapshot_uri = camera.get_snapshot_uri()
-        print(f"快照URL: {snapshot_uri}")
-
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
+# # 使用示例
+# if __name__ == '__main__':
+#     IP = '192.168.1.68'
+#     PORT = 80
+#     USER = 'admin'
+#     PASSWORD = 'system123'
+#     try:
+#         # 初始化连接
+#         camera = ONVIFCameraController(
+#             ip=IP,
+#             port=PORT,
+#             user=USER,
+#             password=PASSWORD
+#             # wsdl_dir='../wsdl/'
+#         )
+#
+#         # 加载profiles
+#         camera.load_profiles()
+#
+#         # 获取PTZ状态
+#         status = camera.get_ptz_status()
+#         print(f"当前PTZ状态: {status}")
+#
+#         # 打印所有profile
+#         print("可用profiles:")
+#         for profile in camera.profiles:
+#             print(f" - {profile.Name} (Token: {profile.token})")
+#
+#         # 获取快照地址
+#         snapshot_uri = camera.get_snapshot_uri()
+#         print(f"快照URL: {snapshot_uri}")
+#
+#     except Exception as e:
+#         print(f"发生错误: {str(e)}")
