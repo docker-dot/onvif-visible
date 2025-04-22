@@ -2,6 +2,8 @@ from UIconnect.device_driver_controller import *
 from UIconnect.show_video_controller import *
 from UIconnect.middle_controller import *
 
+from UI.device_base_move_controller import *
+
 """
 这是接口代码，定义了不同任务和控制
 摄像头有两个
