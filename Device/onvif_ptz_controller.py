@@ -1,4 +1,7 @@
 # Device/onvif_ptz_controller.py
+from urllib.error import URLError
+from urllib.parse import urlsplit, quote_plus, urlunsplit
+
 from onvif import ONVIFCamera
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -10,12 +13,17 @@ class OnvifPTZController(QObject):  # 必须继承QObject
 
     def __init__(self, ip, port, user, passwd):
         super().__init__()  # 需要调用父类构造函数
+        self.is_connected = False
+        self._media_service = None
+        self.profile_tokens = None
+        self._current_profile = None
+        self.ptz = None
+        self.stream_rtsp = None
         self._init_device(ip, port, user, passwd)
         self.pt_speed = 0.5
         self.zoom_speed = 0.5
 
     def _init_device(self, ip, port, user, passwd):
-        return 0
         """设备初始化"""
         try:
             self.camera = ONVIFCamera(
@@ -24,11 +32,52 @@ class OnvifPTZController(QObject):  # 必须继承QObject
                 user,
                 passwd
             )
-            media = self.camera.create_media_service()
-            self.profile_token = media.GetProfiles()[0].token
+            self._media_service = self.camera.create_media_service()
+            self.profile_tokens = self._media_service.GetProfiles()
+            self._current_profile = self.profile_tokens[0].token
             self.ptz = self.camera.create_ptz_service()
+            self.is_connected = True
+            self.stream_rtsp = self.get_rtsp_stream(user, passwd)
+            print(self.stream_rtsp)
         except Exception as e:
             raise ConnectionError(f"设备连接失败: {str(e)}")
+
+    def get_rtsp_stream(self, user, passwd):
+        # stream_uri = media_service.GetStreamUri({
+        #     'StreamSetup': {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}},
+        #     'ProfileToken': profile.token  # 使用第一个Profile（通常是红外模式） 这里需要修改为红外的profile的token
+        # })
+        try:
+            # 获取第一个 Profile 的 RTSP 地址
+            request = self._media_service.create_type('GetStreamUri')
+            request.ProfileToken = self._current_profile
+            request.StreamSetup = {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}}
+
+            stream_uri = self._media_service.GetStreamUri(request)['Uri']
+            # return stream_uri[0:7] + user + ':' + passwd + '@' + stream_uri[7:]
+
+            try:
+                # 分解原始URL组件
+                parts = urlsplit(stream_uri)
+
+                # 编码含特殊字符的密码（如 +/@# 等）
+                safe_password = quote_plus(passwd, safe='')
+
+                # 重构网络地址部分（插入认证信息）
+                new_netloc = f"{user}:{safe_password}@{parts.netloc}"
+
+                # 替换网络地址并保留其他组件
+                new_parts = parts._replace(netloc=new_netloc)
+
+                final_parts = new_parts._replace()
+
+                return urlunsplit(final_parts)
+            except (AttributeError, ValueError) as e:
+                raise URLError(f"URL解析失败: {str(e)}") from e
+
+        except Exception as e:
+            print(f"获取 RTSP 流失败: {str(e)}")
+
 
     # 云台方向控制方法
     def start_up(self):
@@ -84,7 +133,7 @@ class OnvifPTZController(QObject):  # 必须继承QObject
 
         try:
             request = self.ptz.create_type('ContinuousMove')
-            request.ProfileToken = self.profile_token
+            request.ProfileToken = self._current_profile
             request.Velocity = {
                 "PanTilt": {"x": pan_speed, "y": tilt_speed},
                 "Zoom": 0
@@ -104,7 +153,7 @@ class OnvifPTZController(QObject):  # 必须继承QObject
 
         try:
             request = self.ptz.create_type('ContinuousMove')
-            request.ProfileToken = self.profile_token
+            request.ProfileToken = self._current_profile
             request.Velocity = {
                 "PanTilt": {"x": 0, "y": 0},
                 "Zoom": zoom_speed
@@ -119,10 +168,20 @@ class OnvifPTZController(QObject):  # 必须继承QObject
         if self.ptz:
             try:
                 stop_request = self.ptz.create_type('Stop')
-                stop_request.ProfileToken = self.profile_token
+                stop_request.ProfileToken = self._current_profile
                 stop_request.PanTilt = True
                 stop_request.Zoom = True
                 self.ptz.Stop(stop_request)
                 self.status_signal.emit("已停止所有运动")
             except Exception as e:
                 self.error_signal.emit(f"停止失败: {str(e)}")
+
+    def get_snapshot_uri(self):
+        """获取快照URL"""
+        if not self._current_profile:
+            self.error_signal.emit("未选择媒体profile")
+
+        try:
+            return self._media_service.GetSnapshotUri({'ProfileToken': self._current_profile.token})
+        except Exception as e:
+            self.error_signal.emit(f"获取快照URI失败: {str(e)}")

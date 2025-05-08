@@ -15,7 +15,7 @@ def main():
         window.show()
 
         # 异常处理（示例）
-        if not window.controller.is_connected():
+        if not window.controller.is_connected:
             raise ConnectionError("无法连接摄像头")
 
     except Exception as e:
