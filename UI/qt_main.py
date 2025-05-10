@@ -12,98 +12,6 @@ from Device.onvif_ptz_controller import OnvifPTZController
 from PyQt5.QtCore import QThread, pyqtSignal
 
 
-# class VideoThread(QThread):
-#     frame_ready = pyqtSignal(object)  # 发送帧数据信号
-#     status_signal = pyqtSignal(str)  # 状态信号
-#     error_signal = pyqtSignal(str)  # 错误信号
-#
-#     def __init__(self, rtsp_url):
-#         super().__init__()
-#         self.rtsp_url = rtsp_url
-#         self.running = False
-#         self.cap = None
-#         # self.last_frame = None
-#         self.lock = QMutex()
-#         self.target_fps = 30
-#         self.frame_interval = 1 / self.target_fps
-#         # self.reconnect_interval = 5
-#         # self.condition = QWaitCondition()
-#         # self.reconnect_attempts = 0
-#
-#     def run(self):
-#         self.running = True
-#         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-#
-#         while self.running:
-#             self.lock.lock()
-#             try:
-#                 # 使用更稳定的视频捕获参数
-#                 self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-#                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-#                 self.cap.set(cv2.CAP_PROP_FPS, 25)
-#                 # if not self.cap or not self.cap.isOpened():
-#                 #     self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-#                 #     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少缓冲区
-#
-#                 if not self.cap.isOpened():
-#                     raise ConnectionError("无法打开视频流")
-#
-#                 self.status_signal.emit("视频流已连接")
-#
-#                 while self.running and self.cap.isOpened():
-#                     ret, frame = self.cap.read()
-#                     if ret:
-#                         with QMutexLocker(self.lock):
-#                             self.last_frame = frame.copy()
-#                         self.frame_ready.emit(frame)
-#                     else:
-#                         self.error_signal.emit("视频流中断，尝试重连...")
-#                         break
-#                     time.sleep(0.03)  # 控制帧率
-#
-#                 # if self.cap.isOpened():
-#                 #     ret, frame = self.cap.read()
-#                 #     if ret:
-#                 #         self.frame_ready.emit(frame)
-#                 #         self.reconnect_attempts = 0
-#                 #     else:
-#                 #         self.error_signal.emit("视频流中断，尝试重连...")
-#                 #         self.reconnect_attempts += 1
-#                 #         self.restart_capture()
-#                 # else:
-#                 #     raise ConnectionError("无法连接网络摄像头")
-#                 # self.condition.wait(self.mutex, 30)  # 30ms间隔
-#             except Exception as e:
-#                 self.error_signal.emit(f"连接错误: {str(e)}")
-#                 # self.error_signal.emit(str(e))
-#                 # self.restart_capture()
-#             finally:
-#                 if self.cap:
-#                     self.cap.release()
-#                 if self.running:
-#                     time.sleep(self.reconnect_interval)
-#                 # self.mutex.unlock()
-#
-#     def get_frame(self):
-#         with QMutexLocker(self.lock):
-#             return self.last_frame.copy() if self.last_frame is not None else None
-#
-#     def stop(self):
-#         self.running = False
-#         if self.isRunning():
-#             self.wait(2000)  # 等待线程正常退出
-#
-#     def restart_capture(self):
-#         if self.cap:
-#             self.cap.release()
-#         time.sleep(1)  # 重连间隔
-#
-#     # def stop(self):
-#     #     self.running = False
-#     #     self.condition.wakeAll()
-#     #     self.wait(2000)
-
-
 class VideoThread(QThread):
     frame_ready = pyqtSignal(object)
     status_signal = pyqtSignal(str)
@@ -117,37 +25,56 @@ class VideoThread(QThread):
         self.lock = QMutex()
         self.last_frame = None
         self.reconnect_interval = 3  # 秒
+        self.timeout_ms = 5000  # 新增超时参数
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
 
     def run(self):
         self.running = True
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        # os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp"
 
-        while self.running:
+        while self.running and self.reconnect_attempts < self.max_reconnect_attempts:
             try:
-                self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+                self.cap = cv2.VideoCapture(self.rtsp_url + f"?timeout={self.timeout_ms}", cv2.CAP_FFMPEG)
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)
+                self.cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.timeout_ms)
+                self.cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, self.timeout_ms)
                 if not self.cap.isOpened():
                     raise ConnectionError("无法打开视频流")
 
                 self.status_signal.emit("视频流已连接")
 
                 while self.running and self.cap.isOpened():
+                    start_time = time.time()
                     ret, frame = self.cap.read()
+
+                    # 超时检测（关键改进）
+                    if (time.time() - start_time) > (self.timeout_ms / 1000):
+                        raise TimeoutError("帧读取超时")
                     if ret:
                         with QMutexLocker(self.lock):
                             self.last_frame = frame.copy()
                         self.frame_ready.emit(frame)
-                        time.sleep(0.03)
+                        # time.sleep(0.03)
                     else:
                         self.error_signal.emit("视频流中断，尝试重连...")
                         break
+            except TimeoutError as e:
+                self.reconnect_attempts += 1
+                self.error_signal.emit(f"超时重连({self.reconnect_attempts}/{self.max_reconnect_attempts})")
             except Exception as e:
                 self.error_signal.emit(f"连接错误: {str(e)}")
             finally:
-                if self.cap:
+                # 改进资源释放逻辑
+                if hasattr(self, 'cap') and self.cap.isOpened():
                     self.cap.release()
-                if self.running:
-                    time.sleep(self.reconnect_interval)
+                del self.cap
+                self.cap = None
+                # if self.cap:
+                #     self.cap.release()
+                # if self.running:
+                #     time.sleep(self.reconnect_interval)
 
     def stop(self):
         self.running = False
@@ -168,7 +95,7 @@ class CameraController(QWidget):
         self.frame_mutex = QMutex()
         self.video_thread = None
 
-        self.controller = OnvifPTZController("192.168.1.68", 80, "admin", "system123")
+        self.controller = OnvifPTZController("192.168.1.2", 8000, "admin", "system123")
         self.init_ui()
         self.setup_connections()
 
@@ -185,47 +112,10 @@ class CameraController(QWidget):
             self.stop_video_stream()
             self.btn_camera.setText("开始预览")
 
-        # if not self.video_enabled or not self.video_thread.isRunning():
-        #     try:
-        #         # 使用RTSP流替换本地摄像头
-        #         rtsp_url = self.controller.stream_rtsp
-        #         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-        #         self.cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        #         # self.cap = cv2.VideoCapture(rtsp_url)
-        #
-        #         if not self.cap.isOpened():
-        #             raise ConnectionError("无法连接网络摄像头")
-        #
-        #         self.timer.start(30)
-        #         self.video_enabled = True
-        #         self.btn_camera.setText("关闭视频")
-        #     except Exception as e:
-        #         self.show_error(str(e))
-        #         if self.cap:
-        #             self.cap.release()
-        # else:
-        #     self.cap.release()
-        #     self.timer.stop()
-        #     self.video_label.clear()
-        #     self.video_enabled = False
-        #     self.btn_camera.setText("启动视频")
-
-        # if not self.video_enabled:
-        #     self.cap = cv2.VideoCapture(0)  # 使用默认摄像头
-        #     if not self.cap.isOpened():
-        #         self.show_error("摄像头无法打开")
-        #         return
-        #     self.timer.start(30)  # 30ms刷新间隔
-        #     self.video_enabled = True
-        # else:
-        #     self.cap.release()
-        #     self.timer.stop()
-        #     self.video_label.clear()
-        #     self.video_enabled = False
-
     def start_video_stream(self):
         self.timer.start()  # 启动定时器
-        rtsp_url = self.controller.stream_rtsp + '&transport=tcp'
+        rtsp_url = self.controller.stream_rtsp + '?transport=tcp'
+        # rtsp_url = self.controller.stream_rtsp
         self.video_thread = VideoThread(rtsp_url)
         self.video_thread.frame_ready.connect(self.on_new_frame, Qt.QueuedConnection)
         self.timer.timeout.connect(self.update_display)
@@ -244,15 +134,33 @@ class CameraController(QWidget):
         with QMutexLocker(self.video_thread.lock):
             self.current_frame = frame
 
+    # def update_display(self):
+    #     if self.current_frame is not None:
+    #         # 使用硬件加速缩放
+    #         rgb_image = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
+    #         h, w, _ = rgb_image.shape
+    #         bytes_per_line = rgb_image.strides[0]
+    #
+    #         # 创建QImage时使用内存拷贝确保线程安全
+    #         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+    #
+    #         # 保持宽高比缩放
+    #         scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+    #             self.video_label.width(),
+    #             self.video_label.height(),
+    #             Qt.KeepAspectRatio,
+    #             Qt.SmoothTransformation
+    #         )
+    #         self.video_label.setPixmap(scaled_pixmap)
+
     def update_display(self):
         if self.current_frame is not None:
-            # 使用硬件加速缩放
-            rgb_image = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
-            h, w, _ = rgb_image.shape
-            bytes_per_line = rgb_image.strides[0]
+            # 直接使用 BGR 图像，不进行重复转换
+            h, w, _ = self.current_frame.shape
+            bytes_per_line = self.current_frame.strides[0]
 
-            # 创建QImage时使用内存拷贝确保线程安全
-            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            # 使用 QImage.Format_BGR888 以避免不必要的颜色空间转换
+            qt_image = QImage(self.current_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
 
             # 保持宽高比缩放
             scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
@@ -340,58 +248,59 @@ class CameraController(QWidget):
                                           Qt.SmoothTransformation)
             self.video_label.setPixmap(scaled_pixmap)
 
-    class VideoThread(QThread):
-        frame_ready = pyqtSignal(object)
-        status_signal = pyqtSignal(str)
-        error_signal = pyqtSignal(str)
+# class VideoThread(QThread):
+#     frame_ready = pyqtSignal(object)
+#     status_signal = pyqtSignal(str)
+#     error_signal = pyqtSignal(str)
+#
+#     def __init__(self, rtsp_url):
+#         super().__init__()
+#         self.rtsp_url = rtsp_url
+#         self.running = False
+#         self.cap = None
+#         self.lock = QMutex()
+#         self.last_frame = None
+#         self.reconnect_interval = 3  # 秒
+#
+#     def run(self):
+#         self.running = True
+#         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+#
+#         while self.running:
+#             try:
+#                 self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+#                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+#                 if not self.cap.isOpened():
+#                     raise ConnectionError("无法打开视频流")
+#
+#                 self.status_signal.emit("视频流已连接")
+#
+#                 while self.running and self.cap.isOpened():
+#                     ret, frame = self.cap.read()
+#                     if ret:
+#                         with QMutexLocker(self.lock):
+#                             self.last_frame = frame.copy()
+#                         self.frame_ready.emit(frame)
+#                         time.sleep(0.03)
+#                     else:
+#                         self.error_signal.emit("视频流中断，尝试重连...")
+#                         break
+#             except Exception as e:
+#                 self.error_signal.emit(f"连接错误: {str(e)}")
+#             finally:
+#                 if self.cap:
+#                     self.cap.release()
+#                 if self.running:
+#                     time.sleep(self.reconnect_interval)
+#
+#     def stop(self):
+#         self.running = False
+#         self.wait(2000)
+#
+#     def get_frame(self):
+#         with QMutexLocker(self.lock):
+#             return self.last_frame.copy() if self.last_frame is not None else None
 
-        def __init__(self, rtsp_url):
-            super().__init__()
-            self.rtsp_url = rtsp_url
-            self.running = False
-            self.cap = None
-            self.lock = QMutex()
-            self.last_frame = None
-            self.reconnect_interval = 3  # 秒
-
-        def run(self):
-            self.running = True
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-
-            while self.running:
-                try:
-                    self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-                    if not self.cap.isOpened():
-                        raise ConnectionError("无法打开视频流")
-
-                    self.status_signal.emit("视频流已连接")
-
-                    while self.running and self.cap.isOpened():
-                        ret, frame = self.cap.read()
-                        if ret:
-                            with QMutexLocker(self.lock):
-                                self.last_frame = frame.copy()
-                            self.frame_ready.emit(frame)
-                            time.sleep(0.03)
-                        else:
-                            self.error_signal.emit("视频流中断，尝试重连...")
-                            break
-                except Exception as e:
-                    self.error_signal.emit(f"连接错误: {str(e)}")
-                finally:
-                    if self.cap:
-                        self.cap.release()
-                    if self.running:
-                        time.sleep(self.reconnect_interval)
-
-        def stop(self):
-            self.running = False
-            self.wait(2000)
-
-        def get_frame(self):
-            with QMutexLocker(self.lock):
-                return self.last_frame.copy() if self.last_frame is not None else None
     def init_ui(self):
         self.setWindowTitle("PTZ摄像头控制器")
         self.setGeometry(100, 100, 600, 400)
@@ -405,8 +314,8 @@ class CameraController(QWidget):
 
         # 视频显示区域
         self.video_group = QGroupBox("实时画面")
-        self.video_label = QLabel(self)
-        # self.video_label = QLabel()
+        # self.video_label = QLabel(self)
+        self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setStyleSheet("background-color: black;")
