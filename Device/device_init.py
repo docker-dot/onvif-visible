@@ -1,5 +1,8 @@
+import threading
 import time
+from collections import deque
 
+import cv2
 from onvif import ONVIFCamera, ONVIFError
 from typing import List, Optional, Dict, Any
 
@@ -349,8 +352,49 @@ class Device:
         except ONVIFError as e:
             raise RuntimeError(f"获取快照URI失败: {str(e)}") from e
 
+    @property
+    def media_service(self):
+        return self._media_service
+
+    @property
+    def current_profile(self):
+        return self._current_profile
+
 
 # 使用示例
+class RTSPStreamer:
+    def __init__(self, rtsp_rul, buffer_size=2):
+        self.cap = cv2.VideoCapture(rtsp_rul)
+        # # 启用NVIDIA GPU 解码 （需安装 CUDA 和编译 OpenCV 的 GPU 版本）
+        # cap = cv2.VideoCapture(rtsp_rul, cv2.CAP_FFMPEG)
+        # cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+        self.buffer = deque(maxlen=buffer_size)
+        self.lock = threading.Lock()
+        self.running = False
+
+    def _capture_frame(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            with self.lock:
+                self.buffer.append(frame)
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._capture_frame, daemon=True)
+        self.thread.start()
+
+    def get_last_frame(self):
+        with self.lock:
+            return self.buffer[-1] if self.buffer else None
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+        self.cap.release()
+
+
 if __name__ == '__main__':
     IP = '192.168.1.68'
     PORT = 80
@@ -369,6 +413,21 @@ if __name__ == '__main__':
         # 加载profiles
         camera.load_profiles()
 
+        # stream_uri = camera.media_service.GetStreamUri({
+        #     'StreamSetup': {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}},
+        #     'ProfileToken': camera.current_profile.token})
+        # print("RTSP流地址：", stream_uri.Uri)
+        #
+        # streamer = RTSPStreamer(stream_uri)
+        # streamer.start()
+        #
+        # while True:
+        #     frame = streamer.get_latest_frame()
+        #     if frame is None:
+        #         cv2.imshow("RTSP Preview", frame)
+        #     if cv2.waitkey(1) == ord('q'):
+        #         break
+
         # # 获取PTZ状态
         # status = camera.get_ptz_status()
         # print(f"当前PTZ状态: {status}")
@@ -378,9 +437,9 @@ if __name__ == '__main__':
         # for profile in camera.profiles:
         #     print(f" - {profile.Name} (Token: {profile.token})")
 
-        onvif_pos = physical_to_onvif(230, 27, 6.4)
-        # camera.absolute_move(onvif_pos[0], onvif_pos[1], onvif_pos[2])
-        camera.absolute_move(-1, -1, 0.027)
+        onvif_pos = physical_to_onvif(20, 0, 1)
+        camera.absolute_move(onvif_pos[0], onvif_pos[1], onvif_pos[2])
+        # camera.absolute_move(-1, -1, 0.027)
 
         # time.sleep(5)
 
