@@ -1,3 +1,5 @@
+import time
+
 from onvif import ONVIFCamera, ONVIFError
 from typing import List, Optional, Dict, Any
 
@@ -5,6 +7,76 @@ IP = '192.168.1.68'
 PORT = 80
 USER = 'admin'
 PASSWORD = 'system123'
+
+
+def physical_to_onvif(pan_deg=None, tilt_deg=None, zoom_multiple=None):
+    """
+    将物理参数转换为ONVIF归一化坐标（范围：Pan/Tilt为[-1,1]，Zoom为[0,1]）
+    参数：
+      pan_deg   : 水平角度（0~360°）
+      tilt_deg  : 垂直角度（-25~90°）
+      zoom_multiple : 变焦倍数（1~37x）
+    返回：
+      (x, y, z) : ONVIF坐标元组（未提供的参数返回None）
+    """
+    x, y, z = None, None, None
+
+    # Pan 转换（0°~360° → -1~1）
+    if pan_deg is not None:
+        x = (pan_deg - 180) / 180  # 0°→-1, 180°→0, 360°→1
+
+    # Tilt 转换（-27°~90° → -1~1）
+    if tilt_deg is not None:
+        tilt_deg = max(-27, min(90, tilt_deg))  # 边界保护
+        if 0 <= tilt_deg <= 90:
+            y = (tilt_deg - 180) / 180
+        elif -27 <= tilt_deg < 0:
+            y = (tilt_deg + 180) / 180
+
+    # Zoom 转换（1x~37x → 0~1）
+    if zoom_multiple is not None:
+        zoom_multiple = max(1, min(37, zoom_multiple))  # 边界保护
+        z = zoom_multiple / 37
+
+    return (x, y, z)
+
+
+def onvif_to_physical(x=None, y=None, z=None):
+    """
+    将ONVIF归一化坐标转换为物理参数
+    参数：
+      x : 水平坐标（-1~1）
+      y : 垂直坐标（-1~1）
+      z : 变焦坐标（0~1）
+    返回：
+      (pan, tilt, zoom) : 物理值元组（未提供的参数返回None）
+    """
+    pan, tilt, zoom = None, None, None
+
+    # Pan 转换（-1~1 → 0°~360°）
+    if x is not None:
+        x = max(-1, min(1, x))  # 边界保护
+        pan = x * 180 + 180
+        pan = round(pan, 1)
+        # pan = pan % 360  # 确保结果在0~360范围内
+
+    # Tilt 转换（-1~1 → -25°~90°）
+    if y is not None:
+        if y <= 0:
+            y = max(-1, min(-0.5, y))
+            tilt = y * 180 + 180
+        if y > 0:
+            y = max(0.85, min(1, y))
+            tilt = y * 180 - 180
+        tilt = round(tilt, 1)
+
+    # Zoom 转换（0~1 → 1x~37x）
+    if z is not None:
+        z = max(0, min(1, z))
+        zoom = z * 37
+        zoom = round(zoom, 1)
+
+    return (pan, tilt, zoom)
 
 
 class Device:
@@ -45,7 +117,7 @@ class Device:
                 raise RuntimeError("获取设备服务能力失败") from e
         return f'http://www.onvif.org/ver20/{service_name}/wsdl' in self._services_available or f'http://www.onvif.org/ver10/{service_name}/wsdl' in self._services_available
 
-    def _check_space_supported(self, space_type: str) -> bool:
+    def _check_space_supported1(self, space_type: str) -> bool:
         """检查PTZ节点是否支持特定坐标空间"""
         try:
             configs = self._ptz_service.GetConfigurationOptions({
@@ -59,6 +131,43 @@ class Device:
                 # 其他空间类型类似处理
             }
             return bool(space_mapping.get(space_type, []))
+        except ONVIFError as e:
+            raise RuntimeError(f"空间支持检查失败: {str(e)}") from e
+
+    def _check_space_supported(self, space_type: str) -> bool:
+        """
+        检查 PTZ 节点是否支持特定的坐标空间类型。
+
+        参数:
+            space_type (str): 要检查的空间类型名称，例如 'AbsolutePanTiltPositionSpace'。
+
+        返回:
+            bool: 如果支持该空间类型则返回 True，否则返回 False。
+        """
+        try:
+            # 获取当前配置的空间选项
+            configs = self._ptz_service.GetConfigurationOptions({
+                'ConfigurationToken': self._current_profile.PTZConfiguration.token
+            })
+
+            # 安全获取 Spaces 对象，防止 None 导致 AttributeError
+            spaces = getattr(configs, 'Spaces', None)
+            if spaces is None:
+                return False
+
+            # 空间类型与配置项的映射关系（可扩展）
+            space_mapping = {
+                'AbsolutePanTiltPositionSpace': getattr(spaces, 'AbsolutePanTiltPositionSpace', []),
+                'AbsoluteZoomPositionSpace': getattr(spaces, 'AbsoluteZoomPositionSpace', []),
+                'RelativePanTiltTranslationSpace': getattr(spaces, 'RelativePanTiltTranslationSpace', []),
+                'RelativeZoomTranslationSpace': getattr(spaces, 'RelativeZoomTranslationSpace', []),
+                'ContinuousPanTiltVelocitySpace': getattr(spaces, 'ContinuousPanTiltVelocitySpace', []),
+                'ContinuousZoomVelocitySpace': getattr(spaces, 'ContinuousZoomVelocitySpace', []),
+            }
+
+            # 判断所请求的空间类型是否存在非空配置列表
+            return bool(space_mapping.get(space_type, []))
+
         except ONVIFError as e:
             raise RuntimeError(f"空间支持检查失败: {str(e)}") from e
 
@@ -241,37 +350,49 @@ class Device:
             raise RuntimeError(f"获取快照URI失败: {str(e)}") from e
 
 
-# # 使用示例
-# if __name__ == '__main__':
-#     IP = '192.168.1.68'
-#     PORT = 80
-#     USER = 'admin'
-#     PASSWORD = 'system123'
-#     try:
-#         # 初始化连接
-#         camera = ONVIFCameraController(
-#             ip=IP,
-#             port=PORT,
-#             user=USER,
-#             password=PASSWORD
-#             # wsdl_dir='../wsdl/'
-#         )
-#
-#         # 加载profiles
-#         camera.load_profiles()
-#
-#         # 获取PTZ状态
-#         status = camera.get_ptz_status()
-#         print(f"当前PTZ状态: {status}")
-#
-#         # 打印所有profile
-#         print("可用profiles:")
-#         for profile in camera.profiles:
-#             print(f" - {profile.Name} (Token: {profile.token})")
-#
-#         # 获取快照地址
-#         snapshot_uri = camera.get_snapshot_uri()
-#         print(f"快照URL: {snapshot_uri}")
-#
-#     except Exception as e:
-#         print(f"发生错误: {str(e)}")
+# 使用示例
+if __name__ == '__main__':
+    IP = '192.168.1.68'
+    PORT = 80
+    USER = 'admin'
+    PASSWORD = 'system123'
+    try:
+        # 初始化连接
+        camera = Device(
+            ip=IP,
+            port=PORT,
+            user=USER,
+            password=PASSWORD
+            # wsdl_dir='../wsdl/'
+        )
+
+        # 加载profiles
+        camera.load_profiles()
+
+        # # 获取PTZ状态
+        # status = camera.get_ptz_status()
+        # print(f"当前PTZ状态: {status}")
+
+        # # 打印所有profile
+        # print("可用profiles:")
+        # for profile in camera.profiles:
+        #     print(f" - {profile.Name} (Token: {profile.token})")
+
+        onvif_pos = physical_to_onvif(230, 27, 6.4)
+        # camera.absolute_move(onvif_pos[0], onvif_pos[1], onvif_pos[2])
+        camera.absolute_move(-1, -1, 0.027)
+
+        # time.sleep(5)
+
+        # 获取PTZ状态
+        status = camera.get_ptz_status()
+        print(f"当前PTZ状态: {status}")
+
+        ptz = onvif_to_physical(status['Position']['PanTilt']['x'], status['Position']['PanTilt']['y'], status['Position']['Zoom']['x'])
+        print(ptz)
+        # # 获取快照地址
+        # snapshot_uri = camera.get_snapshot_uri()
+        # print(f"快照URL: {snapshot_uri}")
+
+    except Exception as e:
+        print(f"发生错误: {str(e)}")
