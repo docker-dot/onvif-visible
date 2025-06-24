@@ -182,6 +182,9 @@ class OnvifPTZController(QObject):  # 必须继承QObject
             self.error_signal.emit("未选择媒体profile")
 
         try:
-            return self._media_service.GetSnapshotUri({'ProfileToken': self._current_profile.token})
+            snapshot = self._media_service.GetSnapshotUri({
+                'ProfileToken': self._current_profile
+            })
+            return snapshot['Uri'] if isinstance(snapshot, dict) else snapshot.Uri
         except Exception as e:
             self.error_signal.emit(f"获取快照URI失败: {str(e)}")
